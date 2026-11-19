@@ -39,17 +39,18 @@ let calibration=null,calibrationDrag=null;
 const patternSelected=()=>{const p=state.pattern;return p?.layers[p.active]?.find(l=>l.id===p.selected)};
 function ensurePatternState(){
  if(!state.pattern)state.pattern={version:1,enabled:true,active:'FR',selected:null,includeLegacy:false,layers:{FR:[],FL:[],BL:[],BR:[]}};
- const p=state.pattern;if(!PANEL_INFO[p.active])p.active='FR';
+ const p=state.pattern;p.customPanels||={};if(!PANEL_INFO[p.active])p.active='FR';
  for(const key of Object.keys(PANEL_INFO))if(!Array.isArray(p.layers[key]))p.layers[key]=[];
  for(const a of state.angles)if(!a.panelMapping){a.panelPreset=PANEL_MAPS[a.id]?a.id:'front';a.panelMapping=clone(PANEL_MAPS[a.panelPreset]);a.panelCalibrated=a.colorGuard!==false&&!!PANEL_MAPS[a.id]}
  return p;
 }
-async function ensurePatternImages(){if(!state.pattern)return;const layers=Object.values(state.pattern.layers).flat(),missing=layers.some(l=>!loaded.has(l.src));await Promise.all(layers.map(l=>imageReady(l.src)));if(missing)invalidatePattern()}
+async function ensurePatternImages(){if(!state.pattern)return;const sources=[...Object.values(state.pattern.layers).flat().map(l=>l.src),...Object.values(state.pattern.customPanels||{}).flatMap(p=>[p.fittedSrc,p.maskSrc])],missing=sources.some(src=>!loaded.has(src));await Promise.all(sources.map(src=>imageReady(src)));if(missing)invalidatePattern()}
 
 const patternSourcePoints=new Map();
 function cubicPoint(segment,t){const q=1-t;return [0,1].map(axis=>q*q*q*segment[0][axis]+3*q*q*t*segment[1][axis]+3*q*t*t*segment[2][axis]+t*t*t*segment[3][axis])}
 function curveAtY(segments,y){let segment=segments.find(s=>y>=s[0][1]-.001&&y<=s[3][1]+.001)||segments.at(-1);let lo=0,hi=1;for(let i=0;i<30;i++){const mid=(lo+hi)/2;if(cubicPoint(segment,mid)[1]<y)lo=mid;else hi=mid}return cubicPoint(segment,(lo+hi)/2)}
 function panelPoint(panel,t,v){
+ const custom=typeof customPanelPoint==='function'?customPanelPoint(panel,t,v):null;if(custom)return custom;
  const key=panel+':'+t.toFixed(7)+':'+v.toFixed(7);if(patternSourcePoints.has(key))return patternSourcePoints.get(key);
  const model=DENIM_PATTERN_SPEC.pieces[panel[0]==='F'?'F':'B'],construction=DENIM_PATTERN_SPEC.construction,ys=[0,construction.hip_y_cm,construction.body_crotch_y_cm,construction.body_crotch_y_cm+15,construction.knee_y_cm,construction.body_hem_y_cm];
  let i=0;while(i<PANEL_V.length-2&&v>PANEL_V[i+1])i++;const f=(v-PANEL_V[i])/(PANEL_V[i+1]-PANEL_V[i]);const outerY=ys[i]*(1-f)+ys[i+1]*f;
@@ -66,7 +67,7 @@ function drawPatternLayer(c,l){const im=loaded.get(l.src);if(!im)return;const w=
 }
 function getPatternAtlases(){
  if(patternAtlasRevision===patternRevision)return patternAtlases;
- patternAtlases={};for(const panel of Object.keys(PANEL_INFO)){const c=document.createElement('canvas');c.width=PANEL_W;c.height=PANEL_H;const cc=c.getContext('2d');cc.save();panelOutline(cc,panel);cc.clip();for(const l of state.pattern.layers[panel])drawPatternLayer(cc,l);cc.restore();patternAtlases[panel]=c}patternAtlasRevision=patternRevision;return patternAtlases;
+ patternAtlases={};for(const panel of Object.keys(PANEL_INFO)){const c=document.createElement('canvas');c.width=PANEL_W;c.height=PANEL_H;const cc=c.getContext('2d');const custom=customPanelTemplate(panel);cc.save();if(!custom){panelOutline(cc,panel);cc.clip()}for(const l of state.pattern.layers[panel])drawPatternLayer(cc,l);cc.restore();if(custom){cc.globalCompositeOperation='destination-in';const mask=loaded.get(custom.maskSrc);if(mask)cc.drawImage(mask,0,0);else cc.clearRect(0,0,PANEL_W,PANEL_H);cc.globalCompositeOperation='source-over'}patternAtlases[panel]=c}patternAtlasRevision=patternRevision;return patternAtlases;
 }
 function mappedPoint(rows,t,v,base){let i=0;while(i<PANEL_V.length-2&&v>PANEL_V[i+1])i++;const f=(v-PANEL_V[i])/(PANEL_V[i+1]-PANEL_V[i]),p=[0,0];for(let axis=0;axis<2;axis++)p[axis]=((rows[i][0][axis]*(1-t)+rows[i][1][axis]*t)*(1-f)+(rows[i+1][0][axis]*(1-t)+rows[i+1][1][axis]*t)*f)*(axis?H:W);
  if(base&&p[0]>8&&p[0]<W-8&&p[1]>8&&p[1]<H-8){const x=Math.round(p[0]),y=Math.round(p[1]),lum=(xx,yy)=>{const k=(yy*W+xx)*4;return (base.base[k]+base.base[k+1]+base.base[k+2])/3},weight=Math.sin(Math.PI*t);p[0]+=(lum(x+6,y)-lum(x-6,y))*.025*weight;p[1]+=(lum(x,y+6)-lum(x,y-6))*.04*weight}return p;
@@ -93,10 +94,10 @@ function paintPattern(a,target,base){
  const data=c.getImageData(0,0,W,H),pixels=data.data;for(let i=0;i<pixels.length;i+=4){if(!pixels[i+3])continue;const lum=.2126*base.base[i]+.7152*base.base[i+1]+.0722*base.base[i+2],shade=Math.max(.42,Math.min(1.08,.27+lum/245));pixels[i]*=shade;pixels[i+1]*=shade;pixels[i+2]*=shade;pixels[i+3]*=Math.max(.72,Math.min(.98,.75+lum/850))}c.putImageData(data,0,0);c.globalCompositeOperation='destination-in';c.drawImage(base.mask,0,0);c.globalCompositeOperation='source-over';
  patternMapped.set(a.id,{revision:patternRevision,base,mapping:a.panelMapping,canvas:out});target.drawImage(out,0,0);
 }
-function invalidatePattern(){patternRevision++;patternMapped.clear();patternAtlasRevision=-1}
+function invalidatePattern(){patternRevision++;patternMapped.clear();patternAtlasRevision=-1;patternSourcePoints.clear()}
 function drawPatternEditor(){
  if(!patternInitialized)return;const c=$('patternCanvas'),cc=c.getContext('2d'),p=ensurePatternState(),panel=p.active;
- cc.clearRect(0,0,PANEL_W,PANEL_H);cc.fillStyle='#f3f3ed';cc.fillRect(0,0,PANEL_W,PANEL_H);cc.save();panelOutline(cc,panel);cc.fillStyle='#e5e2d6';cc.shadowColor='#39452a18';cc.shadowBlur=16;cc.shadowOffsetY=8;cc.fill();cc.shadowColor='transparent';cc.strokeStyle='#9ea88d';cc.lineWidth=2;cc.stroke();cc.clip();cc.drawImage(getPatternAtlases()[panel],0,0);cc.restore();
+ cc.clearRect(0,0,PANEL_W,PANEL_H);cc.fillStyle='#f3f3ed';cc.fillRect(0,0,PANEL_W,PANEL_H);const custom=customPanelTemplate(panel);if(custom){const fitted=loaded.get(custom.fittedSrc);if(fitted)cc.drawImage(fitted,0,0);cc.drawImage(getPatternAtlases()[panel],0,0)}else{cc.save();panelOutline(cc,panel);cc.fillStyle='#e5e2d6';cc.shadowColor='#39452a18';cc.shadowBlur=16;cc.shadowOffsetY=8;cc.fill();cc.shadowColor='transparent';cc.strokeStyle='#9ea88d';cc.lineWidth=2;cc.stroke();cc.clip();cc.drawImage(getPatternAtlases()[panel],0,0);cc.restore();}
  cc.save();cc.strokeStyle='#89967c88';cc.lineWidth=1.5;cc.setLineDash([8,8]);for(const v of [.16,.30,.68]){const l=panelPoint(panel,0,v),r=panelPoint(panel,1,v);cc.beginPath();cc.moveTo(...l);cc.lineTo(...r);cc.stroke()}const top=panelPoint(panel,.5,.05),bottom=panelPoint(panel,.5,.96);cc.beginPath();cc.moveTo(...top);cc.lineTo(...bottom);cc.stroke();cc.restore();
  cc.font='25px sans-serif';cc.fillStyle='#738367';cc.textAlign='center';cc.fillText('腰口',PANEL_W/2,44);cc.fillText('裤脚',PANEL_W/2,PANEL_H-12);cc.font='21px sans-serif';cc.fillText(PANEL_INFO[panel].mirror?'内侧 ← → 外侧':'外侧 ← → 内侧',PANEL_W/2,PANEL_H-49);
  const l=patternSelected();if(l&&!l.repeat){const im=loaded.get(l.src),w=l.size/100*PANEL_W,h=w*(im?im.height/im.width:1);cc.save();cc.translate(l.x*PANEL_W,l.y*PANEL_H);cc.rotate(l.rotation*Math.PI/180);cc.strokeStyle='#667d46';cc.lineWidth=2;cc.setLineDash([7,5]);cc.strokeRect(-w/2-5,-h/2-5,w+10,h+10);cc.restore()}
@@ -104,16 +105,16 @@ function drawPatternEditor(){
 function queuePatternPreviews(){if(!patternInitialized||patternMode!=='pattern')return;clearTimeout(patternPreviewTimer);patternPreviewTimer=setTimeout(renderPatternPreviews,90)}
 async function renderPatternPreviews(){
  const run=++patternPreviewRun;$('patternSyncStatus').textContent='正在同步…';
- try{await ensurePatternImages();for(const a of state.angles){if(run!==patternPreviewRun)return;await prepare(a);const small=document.querySelector('[data-preview-id="'+CSS.escape(a.id)+'"] canvas');if(!small)continue;const one=document.createElement('canvas');one.width=W;one.height=H;paint(a,one.getContext('2d'),false);small.getContext('2d').clearRect(0,0,small.width,small.height);small.getContext('2d').drawImage(one,0,0,small.width,small.height);await new Promise(resolve=>setTimeout(resolve,0))}if(run===patternPreviewRun)$('patternSyncStatus').textContent='✓ 所有角度已同步'}catch(e){$('patternSyncStatus').textContent='部分预览未完成';toast(e.message)}
+ try{await ensurePatternImages();drawPatternEditor();for(const a of state.angles){if(run!==patternPreviewRun)return;await prepare(a);const small=document.querySelector('[data-preview-id="'+CSS.escape(a.id)+'"] canvas');if(!small)continue;const one=document.createElement('canvas');one.width=W;one.height=H;paint(a,one.getContext('2d'),false);small.getContext('2d').clearRect(0,0,small.width,small.height);small.getContext('2d').drawImage(one,0,0,small.width,small.height);await new Promise(resolve=>setTimeout(resolve,0))}if(run===patternPreviewRun)$('patternSyncStatus').textContent='✓ 所有角度已同步'}catch(e){$('patternSyncStatus').textContent='部分预览未完成';toast(e.message)}
 }
-function renderPatternCards(){const grid=$('patternPreviewGrid');grid.replaceChildren();for(const [i,a]of state.angles.entries()){const card=node('article','pattern-preview-card');card.dataset.previewId=a.id;const c=node('canvas');c.width=260;c.height=390;c.setAttribute('aria-label',a.name+'同步效果图');c.onclick=()=>{state.active=a.id;renderExportChoices();toast('已选择 '+a.name+'，可从顶部导出单张')};const title=node('div','pattern-preview-title');title.append(text(node('strong'),String(i+1).padStart(2,'0')+' / '+a.name),text(node('span',a.panelCalibrated?'mapped-label':'pending-label'),a.panelCalibrated?'已对应':'待校准'));const actions=node('div','pattern-preview-actions'),exp=text(node('button'),'导出单张'),cal=text(node('button'),'校准对应');exp.onclick=()=>exportSingle(a.id);cal.onclick=()=>openPanelCalibration(a.id);actions.append(exp,cal);card.append(c,title,actions);grid.append(card)}}
+function renderPatternCards(){const grid=$('patternPreviewGrid');grid.replaceChildren();for(const [i,a]of state.angles.entries()){const card=node('article','pattern-preview-card');card.dataset.previewId=a.id;const c=node('canvas');c.width=260;c.height=390;c.setAttribute('aria-label',a.name+'同步效果图');const open=node('button','pattern-preview-open');open.type='button';open.setAttribute('aria-label','放大查看 '+a.name);open.title='点击放大查看 '+a.name;open.append(c,text(node('span','pattern-preview-zoom-badge'),'⤢ 放大'));open.onclick=()=>openImageViewer(a.id);const title=node('div','pattern-preview-title');title.append(text(node('strong'),String(i+1).padStart(2,'0')+' / '+a.name),text(node('span',a.panelCalibrated?'mapped-label':'pending-label'),a.panelCalibrated?'已对应':'待校准'));const actions=node('div','pattern-preview-actions'),exp=text(node('button'),'导出单张'),cal=text(node('button'),'校准对应');exp.onclick=()=>exportSingle(a.id);cal.onclick=()=>openPanelCalibration(a.id);actions.append(exp,cal);card.append(open,title,actions);grid.append(card)}}
 function refreshPatternUI(){
  if(!patternInitialized)return;const p=ensurePatternState();invalidatePattern();
  $('patternPanelName').textContent=PANEL_INFO[p.active].name;$('patternAngleCount').textContent=state.angles.length;
  document.querySelectorAll('[data-panel]').forEach(b=>b.classList.toggle('active',b.dataset.panel===p.active));
  $('patternLegacyToggle').checked=!!p.includeLegacy;const oldCount=state.angles.reduce((n,a)=>n+a.layers.length,0);$('patternLegacyCount').textContent=oldCount;
  const list=$('patternLayerList');list.replaceChildren();for(const l of p.layers[p.active].slice().reverse()){const b=node('button','layer-item'+(l.id===p.selected?' active':''));b.append(thumb(l.src,l.name),text(node('strong'),l.name));b.onclick=()=>{p.selected=l.id;refreshPatternProperties();drawPatternEditor()};list.append(b)}if(!list.children.length)list.append(text(node('p','empty-layer'),'这块裤片还没有图案'));
- refreshPatternProperties();drawPatternEditor();renderPatternCards();queuePatternPreviews();updateUndo();
+ updatePanelTemplateLabels();refreshPatternProperties();drawPatternEditor();renderPatternCards();queuePatternPreviews();updateUndo();
 }
 function refreshPatternProperties(){const l=patternSelected();$('patternProperties').hidden=!l;$('patternSelectionHint').hidden=!!l;if(!l)return;$('patternX').value=(l.x*100).toFixed(1);$('patternY').value=(l.y*100).toFixed(1);$('patternSize').value=l.size;$('patternSizeValue').textContent=l.size+'%';$('patternRotation').value=l.rotation;$('patternRotationValue').textContent=l.rotation+'°';$('patternOpacity').value=l.opacity;$('patternOpacityValue').textContent=l.opacity+'%';$('patternRepeat').checked=!!l.repeat}
 function patternChanged(){invalidatePattern();drawPatternEditor();refreshPatternProperties();queuePatternPreviews();markDirty()}
@@ -161,7 +162,7 @@ function bindPanelCalibration(){
  $('saveCalibration').onclick=()=>{if(!calibration)return;const a=state.angles.find(a=>a.id===calibration.id);checkpoint();a.panelMapping=clone(calibration.mapping);a.panelPreset=calibration.preset;a.panelCalibrated=true;$('calibrationDialog').close();calibration=null;refreshPatternUI();paint();markDirty();toast('对应关系已保存，以后改刀版图案会自动更新这张照片')};
 }
 function validatePatternProject(p){
- if(!p.pattern)return p;const master=p.pattern;if(master.version!==1||!master.layers)throw Error('示意裤片工程数据无效');
+ if(!p.pattern)return p;validateCustomPanels(p);const master=p.pattern;if(master.version!==1||!master.layers)throw Error('示意裤片工程数据无效');
  for(const key of Object.keys(PANEL_INFO)){if(!Array.isArray(master.layers[key])||master.layers[key].length>100)throw Error('裤片图层数据无效');for(const l of master.layers[key]){if(typeof l.src!=='string'||!/^data:image\/(png|jpeg|webp|svg\+xml)[;,]/i.test(l.src)||['x','y','size','rotation','opacity'].some(k=>!Number.isFinite(l[k])))throw Error('裤片图案数据无效');l.size=Math.max(5,Math.min(150,l.size));l.opacity=Math.max(5,Math.min(100,l.opacity));l.x=Math.max(0,Math.min(1,l.x));l.y=Math.max(0,Math.min(1,l.y));l.rotation=Math.max(-180,Math.min(180,l.rotation))}}
  for(const a of p.angles)if(a.panelMapping){for(const [key,rows]of Object.entries(a.panelMapping)){if(!PANEL_INFO[key]||!Array.isArray(rows)||rows.length!==6||rows.some(r=>!Array.isArray(r)||r.length!==2||r.some(pt=>!Array.isArray(pt)||pt.length!==2||pt.some(n=>!Number.isFinite(n)||n< -4||n>5))))throw Error('照片裤片对应数据无效')}}return p;
 }
